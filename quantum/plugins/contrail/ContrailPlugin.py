@@ -15,9 +15,7 @@ from quantum.manager import QuantumManager
 from quantum.common import exceptions as exc
 from quantum.db import db_base_plugin_v2
 from quantum.extensions import l3, securitygroup, vpcroutetable
-from quantum.db import portbindings_base
 from quantum.db import l3_db
-from quantum.extensions import portbindings
 from quantum.openstack.common import log as logging
 
 from oslo.config import cfg
@@ -62,9 +60,8 @@ def _read_cfg_boolean(cfg_parser, section, option, default):
 
 
 #TODO define ABC PluginBase for ipam and policy and derive mixin from them
-class ContrailPlugin(db_base_plugin_v2.NeutronDbPluginV2,
+class ContrailPlugin(db_base_plugin_v2.QuantumDbPluginV2,
                      securitygroup.SecurityGroupPluginBase,
-                     portbindings_base.PortBindingBaseMixin,
                      l3_db.L3_NAT_db_mixin):
     """
     .. attention::  TODO remove db. ref and replace ctdb. with db.
