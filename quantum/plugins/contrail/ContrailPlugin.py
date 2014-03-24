@@ -67,8 +67,9 @@ class ContrailPlugin(db_base_plugin_v2.QuantumDbPluginV2,
     .. attention::  TODO remove db. ref and replace ctdb. with db.
     """
 
+    # Added agent to supported extension list to support get_agents
     supported_extension_aliases = ["ipam", "policy", "security-group",
-                                   "router", "route-table", "port-security"]
+                                   "router", "route-table", "port-security", "agent"]
     _cfgdb = None
     _args = None
     _tenant_id_dict = {}
@@ -199,6 +200,11 @@ class ContrailPlugin(db_base_plugin_v2.QuantumDbPluginV2,
         else:
             return name
     #end tenant_name_to_id
+
+    # return empty set
+    def get_agents(self, context, filters=None, fields=None):
+        agents = []
+        return agents;
 
     # Network API handlers
     def create_network(self, context, network):
