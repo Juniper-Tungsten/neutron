@@ -884,7 +884,7 @@ class DBInterface(object):
                 for subnet_vnc in subnet_vncs:
                     cidr = '%s/%s' % (subnet_vnc.subnet.get_ip_prefix(),
                                       subnet_vnc.subnet.get_ip_prefix_len())
-                    if IPAddress(ip_addr) in IPSet([cidr]):
+                    if ip_addr == None or IPAddress(ip_addr) in IPSet([cidr]):
                         subnet_key = self._subnet_vnc_get_key(subnet_vnc,
                                                               net_obj.uuid)
                         subnet_id = self._subnet_vnc_read_mapping(
