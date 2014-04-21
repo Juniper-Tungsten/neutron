@@ -17,6 +17,7 @@ from netaddr import IPNetwork, IPSet, IPAddress
 
 from quantum.common import constants
 from quantum.common import exceptions
+from quantum.extensions import l3
 from quantum.api.v2 import attributes as attr
 from vnc_api.vnc_api import *
 
@@ -535,6 +536,16 @@ class DBInterface(object):
             pass
     #end _instance_ip_delete
 
+    def _floating_ip_pool_create(self, fip_pool_obj):
+        fip_pool_uuid = self._vnc_lib.floating_ip_pool_create(fip_pool_obj)
+
+        return fip_pool_uuid
+    # end _floating_ip_pool_create
+
+    def _floating_ip_pool_delete(self, fip_pool_id):
+        fip_pool_uuid = self._vnc_lib.floating_ip_pool_delete(id=fip_pool_id)
+    # end _floating_ip_pool_delete
+
     # find projects on a given domain
     def _project_list_domain(self, domain_id):
         # TODO till domain concept is not present in keystone
@@ -546,10 +557,13 @@ class DBInterface(object):
 
     # find network ids on a given project
     def _network_list_project(self, project_id):
-        try:
-            project_uuid = str(uuid.UUID(project_id))
-        except Exception:
-            print "Error in converting uuid %s" % (project_id)
+        if project_id:
+            try:
+                project_uuid = str(uuid.UUID(project_id))
+            except Exception:
+                print "Error in converting uuid %s" % (project_id)
+        else:
+            project_uuid = None
 
         resp_dict = self._vnc_lib.virtual_networks_list(parent_id=project_uuid)
 
@@ -699,6 +713,28 @@ class DBInterface(object):
         return project_obj.get_floating_ip_pool_refs()
     #end _fip_pool_refs_project
 
+    def _network_list_router_external(self):
+        ret_list = []
+        nets = self._network_list_project(project_id=None)
+        for net in nets:
+            net_obj = self._virtual_network_read(net_id=net['uuid'])
+            if not net_obj.get_router_external():
+                continue
+            ret_list.append(net)
+        return ret_list
+    #end _network_list_router_external
+
+    def _network_list_shared(self):
+        ret_list = []
+        nets = self._network_list_project(project_id=None)
+        for net in nets:
+            net_obj = self._virtual_network_read(net_id=net['uuid'])
+            if not net_obj.get_is_shared():
+                continue
+            ret_list.append(net)
+        return ret_list
+    #end _network_list_shared
+
     # find networks of floating ip pools project has access to
     def _fip_pool_ref_networks(self, project_id):
         ret_nets = []
@@ -766,10 +802,6 @@ class DBInterface(object):
             if key_name in filters:
                 try:
                     idx = filters[key_name].index(match_value)
-                    if ('shared' in filters and
-                        filters['shared'][0] == True):
-                        # yuck, q-api has shared as list always of 1 elem
-                        return False  # no shared-resource support
                 except ValueError:  # not in requested list
                     return False
             elif len(filters.keys()) == 1:
@@ -1115,13 +1147,30 @@ class DBInterface(object):
 
     def _network_quantum_to_vnc(self, network_q, oper):
         net_name = network_q.get('name', None)
+        try:
+            external_attr = network_q[l3.EXTERNAL]
+        except KeyError:
+            external_attr = attr.ATTR_NOT_SPECIFIED
         if oper == CREATE:
             project_id = str(uuid.UUID(network_q['tenant_id']))
             project_obj = self._project_read(proj_id=project_id)
             id_perms = IdPermsType(enable=True)
             net_obj = VirtualNetwork(net_name, project_obj, id_perms=id_perms)
+            if external_attr == attr.ATTR_NOT_SPECIFIED:
+                net_obj.router_external = False
+            else:
+                net_obj.router_external = external_attr
+            if 'shared' in network_q:
+                net_obj.is_shared = network_q['shared']
+            else:
+                net_obj.is_shared = False
         else:  # READ/UPDATE/DELETE
             net_obj = self._virtual_network_read(net_id=network_q['id'])
+            if oper == UPDATE:
+                if 'shared' in network_q:
+                    net_obj.is_shared = network_q['shared']
+                if external_attr is not attr.ATTR_NOT_SPECIFIED:
+                    net_obj.router_external = external_attr
 
         id_perms = net_obj.get_id_perms()
         if 'admin_state_up' in network_q:
@@ -1167,8 +1216,15 @@ class DBInterface(object):
         extra_dict['contrail:fq_name'] = net_obj.get_fq_name()
         net_q_dict['tenant_id'] = net_obj.parent_uuid.replace('-', '')
         net_q_dict['admin_state_up'] = net_obj.get_id_perms().enable
-        net_q_dict['shared'] = False
+        if net_obj.is_shared:
+            net_q_dict['shared'] = True
+        else:
+            net_q_dict['shared'] = False
         net_q_dict['status'] = constants.NET_STATUS_ACTIVE
+        if net_obj.router_external:
+            extra_dict[l3.EXTERNAL] = True
+        else:
+            extra_dict[l3.EXTERNAL] = False
 
         if net_repr == 'SHOW':
 
@@ -1288,7 +1344,10 @@ class DBInterface(object):
                                'nexthop': 'TODO-nexthop',
                                'subnet_id': sn_id}]
 
-        sn_q_dict['shared'] = False
+        if net_obj.is_shared:
+            sn_q_dict['shared'] = True
+        else:
+            sn_q_dict['shared'] = False
 
         extra_dict = {}
         extra_dict['contrail:instance_count'] = 0
@@ -1585,6 +1644,10 @@ class DBInterface(object):
         net_obj = self._network_quantum_to_vnc(network_q, CREATE)
         net_uuid = self._virtual_network_create(net_obj)
 
+        if net_obj.router_external:
+            fip_pool_obj = FloatingIpPool('floating-ip-pool', net_obj)
+            self._floating_ip_pool_create(fip_pool_obj)
+
         ret_network_q = self._network_vnc_to_quantum(net_obj, net_repr='SHOW')
         self._db_cache['q_networks'][net_uuid] = ret_network_q
 
@@ -1612,8 +1675,23 @@ class DBInterface(object):
     #end network_read
 
     def network_update(self, net_id, network_q):
+        net_obj = self._virtual_network_read(net_id=net_id)
+        router_external = net_obj.get_router_external()
         network_q['id'] = net_id
         net_obj = self._network_quantum_to_vnc(network_q, UPDATE)
+        if net_obj.router_external and not router_external:
+            fip_pools = net_obj.get_floating_ip_pools()
+            fip_pool_obj = FloatingIpPool('floating-ip-pool', net_obj)
+            self._floating_ip_pool_create(fip_pool_obj)
+        if router_external and not net_obj.router_external:
+            fip_pools = net_obj.get_floating_ip_pools()
+            if fip_pools:
+                for fip_pool in fip_pools:
+                    try:
+                        pool_id = fip_pool['uuid']
+                        self._floating_ip_pool_delete(fip_pool_id=pool_id)
+                    except RefsExistError:
+                        raise exceptions.NetworkInUse(net_id=net_id)
         self._virtual_network_update(net_obj)
 
         ret_network_q = self._network_vnc_to_quantum(net_obj, net_repr='SHOW')
@@ -1623,6 +1701,16 @@ class DBInterface(object):
     #end network_update
 
     def network_delete(self, net_id):
+        net_obj = self._virtual_network_read(net_id=net_id)
+        fip_pools = net_obj.get_floating_ip_pools()
+        if fip_pools:
+            for fip_pool in fip_pools:
+                try:
+                    pool_id = fip_pool['uuid']
+                    self._floating_ip_pool_delete(fip_pool_id=pool_id)
+                except RefsExistError:
+                    raise exceptions.NetworkInUse(net_id=net_id)
+
         self._virtual_network_delete(net_id=net_id)
         try:
             del self._db_cache['q_networks'][net_id]
@@ -1634,11 +1722,6 @@ class DBInterface(object):
     def network_list(self, filters=None):
         ret_list = []
 
-        if filters and 'shared' in filters:
-            if filters['shared'][0] == True:
-                # no support for shared networks
-                return ret_list
-
         # collect phase
         all_nets = []  # all n/ws in all projects
         if filters and 'tenant_id' in filters:
@@ -1649,6 +1732,13 @@ class DBInterface(object):
                 # prune is skipped because all_nets is empty
                 for net_id in filters['id']:
                     net_obj = self._network_read(net_id)
+                    if net_obj.is_shared == None:
+                        is_shared = False
+                    else:
+                        is_shared = net_obj.is_shared
+                    if not self._filters_is_present(filters, 'shared',
+                                                    is_shared):
+                        continue
                     net_info = self._network_vnc_to_quantum(net_obj,
                                                             net_repr='LIST')
                     ret_list.append(net_info)
@@ -1656,16 +1746,36 @@ class DBInterface(object):
                 # read all networks in project, and prune below
                 project_ids = filters['tenant_id']
                 for p_id in project_ids:
-                    if 'router:external' in filters:
-                        all_nets.append(self._fip_pool_ref_networks(p_id))
-                    else:
-                        project_nets = self._network_list_project(p_id)
-                        all_nets.append(project_nets)
+                    project_nets = self._network_list_project(p_id)
+                    all_nets.append(project_nets)
+                if 'router:external' in filters:
+                    all_nets.append(self._network_list_router_external())
         elif filters and 'id' in filters:
             # required networks are specified, just read and populate ret_list
             # prune is skipped because all_nets is empty
             for net_id in filters['id']:
                 net_obj = self._network_read(net_id)
+                if net_obj.is_shared == None:
+                    is_shared = False
+                else:
+                    is_shared = net_obj.is_shared
+                if not self._filters_is_present(filters, 'shared',
+                                                is_shared):
+                    continue
+                net_info = self._network_vnc_to_quantum(net_obj,
+                                                        net_repr='LIST')
+                ret_list.append(net_info)
+        elif filters and 'shared' in filters and filters['shared'][0]:
+            nets = self._network_list_shared()
+            for net in nets:
+                net_obj = self._virtual_network_read(net_id=net['uuid'])
+                net_info = self._network_vnc_to_quantum(net_obj,
+                                                        net_repr='LIST')
+                ret_list.append(net_info)
+        elif filters and 'router:external' in filters:
+            nets = self._network_list_router_external()
+            for net in nets:
+                net_obj = self._virtual_network_read(net_id=net['uuid'])
                 net_info = self._network_vnc_to_quantum(net_obj,
                                                         net_repr='LIST')
                 ret_list.append(net_info)
@@ -1674,16 +1784,14 @@ class DBInterface(object):
             dom_projects = self._project_list_domain(None)
             for project in dom_projects:
                 proj_id = project['uuid']
-                if filters and 'router:external' in filters:
-                    all_nets.append(self._fip_pool_ref_networks(proj_id))
-                else:
-                    project_nets = self._network_list_project(proj_id)
-                    all_nets.append(project_nets)
+                project_nets = self._network_list_project(proj_id)
+                all_nets.append(project_nets)
 
         # prune phase
         for project_nets in all_nets:
             for proj_net in project_nets:
                 proj_net_id = proj_net['uuid']
+                net_obj = self._virtual_network_read(net_id=proj_net_id)
                 if not self._filters_is_present(filters, 'id', proj_net_id):
                     continue
 
@@ -1692,8 +1800,15 @@ class DBInterface(object):
                                                 proj_net_fq_name):
                     continue
 
+                if net_obj.is_shared == None:
+                    is_shared = False
+                else:
+                    is_shared = net_obj.is_shared
+                if not self._filters_is_present(filters, 'shared',
+                                                is_shared):
+                    continue
+
                 try:
-                    net_obj = self._network_read(proj_net['uuid'])
                     net_info = self._network_vnc_to_quantum(net_obj,
                                                             net_repr='LIST')
                 except NoIdError:
