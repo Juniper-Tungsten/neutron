@@ -1168,7 +1168,7 @@ class DBInterface(object):
         net_q_dict['shared'] = False
         net_q_dict['status'] = constants.NET_STATUS_ACTIVE
 
-        if net_repr == 'SHOW':
+        if net_repr == 'SHOW' or net_repr == 'LIST':
 
             # This code path is invoked on every port_create.
             # Getting the backrefs can be an expensive operation.
@@ -1200,13 +1200,6 @@ class DBInterface(object):
             if net_policy_refs:
                 extra_dict['contrail:policys'] = \
                     [np_ref['to'] for np_ref in net_policy_refs]
-
-        elif net_repr == 'LIST':
-            extra_dict['contrail:instance_count'] = 0
-            #port_back_refs = net_obj.get_virtual_machine_interface_back_refs()
-            port_back_refs = None
-            if port_back_refs:
-                extra_dict['contrail:instance_count'] = len(port_back_refs)
 
         rt_refs = net_obj.get_route_table_refs()
         if rt_refs:
