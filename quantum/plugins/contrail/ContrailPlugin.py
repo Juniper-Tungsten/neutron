@@ -644,12 +644,6 @@ class ContrailPlugin(db_base_plugin_v2.QuantumDbPluginV2,
         if router['gw_port_id']:
             nw_id = router['gw_port_id']['network_id']
             res['external_gateway_info'] = {'network_id': nw_id}
-        # NOTE(salv-orlando): The following assumes this mixin is used in a
-        # class inheriting from CommonDbMixin, which is true for all existing
-        # plugins.
-        if process_extensions:
-            self._apply_dict_extend_functions(
-                l3.ROUTERS, res, router)
         return self._fields(res, fields)
 
     # Router API handlers
